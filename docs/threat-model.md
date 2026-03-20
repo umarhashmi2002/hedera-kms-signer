@@ -12,30 +12,31 @@ This document describes the threat model for the Hedera KMS Signing Backend, a s
 
 The system has five trust boundaries where data crosses between components with different privilege levels:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  External                                                   │
-│  ┌──────────┐                                               │
-│  │  Client   │──── HTTPS (TLS) ────┐                        │
-│  └──────────┘                      │                        │
-│                          ┌─────────▼──────────┐             │
-│                          │   API Gateway       │             │
-│                          │  (Cognito JWT Auth  │             │
-│                          │   + Rate Limiting)  │             │
-│                          └─────────┬──────────┘             │
-│                                    │  TB1                   │
-│                          ┌─────────▼──────────────────┐     │
-│                          │  Lambda (Signing_Service)   │     │
-│                          │                             │     │
-│                          │  ┌─────────┐  ┌──────────┐ │     │
-│                     TB2  │  │   KMS   │  │ DynamoDB │ │ TB3 │
-│                          │  └─────────┘  └──────────┘ │     │
-│                          └─────────┬──────────────────┘     │
-│                                    │  TB4                   │
-│                          ┌─────────▼──────────┐             │
-│                          │  Hedera Testnet     │             │
-│                          └────────────────────┘             │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph External["🌐 External"]
+        Client[👤 Client]
+    end
+    
+    subgraph TB1["Trust Boundary 1: HTTPS + JWT"]
+        APIGW[API Gateway<br/>Cognito JWT + Rate Limiting]
+    end
+    
+    subgraph TB2["Trust Boundary 2: AWS Internal"]
+        Lambda[Lambda Function]
+        KMS[🔐 KMS HSM]
+        DDB[📝 DynamoDB]
+    end
+    
+    subgraph TB3["Trust Boundary 3: External Network"]
+        Hedera[🌍 Hedera Network]
+    end
+
+    Client -->|HTTPS + JWT| APIGW
+    APIGW -->|IAM Invoke| Lambda
+    Lambda -->|IAM scoped| KMS
+    Lambda -->|IAM scoped| DDB
+    Lambda -->|ECDSA signed tx| Hedera
 ```
 
 | Boundary | From | To | Transport | Auth Mechanism |
@@ -168,7 +169,21 @@ The system has five trust boundaries where data crosses between components with 
 
 ---
 
-## 4. Security Controls Summary
+## 4. Monitoring & Detection Architecture
+
+```mermaid
+graph TB
+    Lambda[⚡ Lambda] -->|Logs| CWLogs[📊 CloudWatch Logs]
+    KMS[🔐 KMS] -->|API calls| CT[📊 CloudTrail → S3]
+    CT -->|Metric filter| A1[🔔 Non-Lambda KMS usage]
+    Lambda -->|Error metric| A2[🔔 Lambda errors > 5%]
+    Lambda -->|Denial metric| A3[🔔 High denial rate > 10/5min]
+    A1 -->|Alert| SNS[📧 Email via SNS]
+    A2 -->|Alert| SNS
+    A3 -->|Alert| SNS
+```
+
+## 5. Security Controls Summary
 
 The following table maps each security control to the threats it mitigates:
 

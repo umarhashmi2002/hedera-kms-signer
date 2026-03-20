@@ -8,9 +8,66 @@ This document describes the architecture of the Hedera KMS Signing Backend, a se
 
 ---
 
+## System Overview Diagram
+
+```mermaid
+graph TB
+    Client[👤 API Consumer<br/>curl / Postman / Frontend]
+
+    subgraph AWS["☁️ AWS Cloud"]
+        APIGW[🌐 API Gateway HTTP API<br/>HTTPS + JWT Auth + Rate Limiting]
+        
+        subgraph LambdaBox["⚡ Lambda Function - Node.js 20.x"]
+            Handler[handler.ts — Route Dispatch]
+            Schemas[schemas.ts — Validation]
+            Policy[policy.ts — Policy Engine]
+            HederaMod[hedera.ts — Tx Builder + keccak256]
+            KMSMod[kms.ts — KMS Signer]
+            AuditMod[audit.ts — Audit Writer]
+            PubKeyMod[publicKey.ts — Key Derivation]
+            RotationMod[rotation.ts — Key Rotation]
+            TokenMod[tokenTransfer.ts — HTS Transfers]
+            SchedMod[scheduledTransfer.ts — Scheduled Tx]
+            ConsMod[consensus.ts — HCS Logging]
+            MultiMod[multisig.ts — Multi-sig Config]
+        end
+
+        Cognito[🔑 Cognito User Pool<br/>JWT Issuer]
+        KMS[(🔐 AWS KMS<br/>ECDSA secp256k1<br/>FIPS 140-2 HSM)]
+        DDB[(📝 DynamoDB<br/>Audit Trail)]
+        CT[📊 CloudTrail]
+        CW[🔔 CloudWatch Alarms]
+        SNS[📧 SNS Alerts]
+    end
+
+    HederaNet[🌍 Hedera Testnet<br/>Consensus + HCS]
+
+    Client -->|HTTPS| APIGW
+    APIGW -->|Validate JWT| Cognito
+    APIGW -->|Invoke| Handler
+    KMSMod -->|kms:Sign / GetPublicKey| KMS
+    AuditMod -->|PutItem / GetItem| DDB
+    HederaMod -->|Submit Tx| HederaNet
+    ConsMod -->|HCS Message| HederaNet
+    CT -->|Monitor KMS calls| CW
+    CW -->|Alert| SNS
+```
+
+---
+
 ## 1. Key Management Architecture
 
 ### KMS Key Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Provisioned: CDK Deploy
+    Provisioned --> Active: Immediate
+    Active --> Active: kms:Sign / kms:GetPublicKey
+    Active --> Rotated: POST /rotate-key
+    Rotated --> Disabled: Grace period
+    Disabled --> [*]: Key retained but unusable
+```
 
 The signing key is an AWS KMS asymmetric key with the following properties:
 
@@ -29,6 +86,17 @@ Lifecycle stages:
 4. **Disabled** — The old key is disabled via `kms:DisableKey`. It can be re-enabled if needed but is no longer used for signing.
 
 ### Signing Flow
+
+The keccak256 + KMS bridge is the core innovation:
+
+```mermaid
+graph LR
+    A[Frozen Tx Bytes] -->|keccak256 hash| B[32-byte Digest]
+    B -->|Send to KMS| C[KMS HSM Signs<br/>ECDSA_SHA_256<br/>MessageType=DIGEST]
+    C -->|DER signature| D[Parse ASN.1 DER]
+    D -->|Extract r, s| E[Raw 64-byte Signature]
+    E -->|signWith| F[Signed Hedera Tx]
+```
 
 1. The Lambda function receives a validated, policy-approved signing request.
 2. A `TransferTransaction` is constructed using the Hedera SDK and frozen to produce deterministic bytes.
@@ -265,11 +333,58 @@ aws kms disable-key --key-id <OLD_KEY_ID>
 
 ---
 
-## 8. Token Transfer Support (Hedera Token Service)
+## 8. Policy Engine Flow
+
+Every request passes through the policy engine before KMS is invoked:
+
+```mermaid
+graph TD
+    Req[Incoming Request] --> V{Schema Valid?}
+    V -->|No| R1[400 VALIDATION_ERROR]
+    V -->|Yes| I{Idempotent?}
+    I -->|Same payload| R2[200 Cached Result]
+    I -->|Diff payload| R3[409 CONFLICT]
+    I -->|New| P1{Amount ≤ max?}
+    P1 -->|No| DENY[403 POLICY_DENIED]
+    P1 -->|Yes| P2{Recipient allowed?}
+    P2 -->|No| DENY
+    P2 -->|Yes| P3{Tx type allowed?}
+    P3 -->|No| DENY
+    P3 -->|Yes| P4{Within hours?}
+    P4 -->|No| DENY
+    P4 -->|Yes| SIGN[✅ Sign via KMS]
+    SIGN --> SUBMIT[Submit to Hedera]
+    SUBMIT --> AUDIT[Write Audit + HCS Log]
+```
+
+---
+
+## 9. Token Transfer Support (Hedera Token Service)
 
 In addition to HBAR CryptoTransfer, the system supports Hedera Token Service (HTS) fungible token transfers via `POST /sign-token-transfer`.
 
 ### Token Transfer Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant L as Lambda
+    participant P as Policy
+    participant K as KMS
+    participant H as Hedera
+
+    C->>L: POST /sign-token-transfer
+    L->>L: Validate (tokenId, amount, accounts)
+    L->>P: Evaluate policy (type=TokenTransfer)
+    P-->>L: Approved (amount check skipped for tokens)
+    L->>L: Build TransferTransaction + addTokenTransfer()
+    L->>L: Freeze → keccak256 hash
+    L->>K: Sign digest
+    K-->>L: DER signature
+    L->>H: Submit signed tx
+    H-->>L: Receipt
+    L-->>C: { transactionId, status }
+```
 
 The token transfer flow mirrors the CryptoTransfer flow:
 
@@ -291,7 +406,7 @@ The token transfer flow mirrors the CryptoTransfer flow:
 
 ---
 
-## 9. Multi-Signature / Threshold Key Support
+## 10. Multi-Signature / Threshold Key Support
 
 Enterprises rarely rely on a single signing key. The system supports Hedera's threshold key architecture via configuration.
 
@@ -324,11 +439,31 @@ When disabled (default), the system operates in single-key mode with the KMS key
 
 ---
 
-## 10. Scheduled Transactions
+## 11. Scheduled Transactions
 
 The system supports Hedera Scheduled Transactions via `POST /schedule-transfer`, enabling secure delayed execution of CryptoTransfer transactions.
 
 ### Scheduled Transfer Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant L as Lambda
+    participant K as KMS
+    participant H as Hedera
+
+    C->>L: POST /schedule-transfer<br/>(executeAfterSeconds: 60)
+    L->>L: Build inner TransferTransaction
+    L->>L: Wrap in ScheduleCreateTransaction<br/>(expiration = now + 60s)
+    L->>L: Freeze → keccak256 hash
+    L->>K: Sign digest
+    K-->>L: DER signature
+    L->>H: Submit schedule
+    H-->>L: scheduleId + txId
+    L-->>C: { scheduleId, status: SUCCESS }
+    Note over H: ⏳ 60 seconds later...
+    H->>H: Auto-execute the inner transfer
+```
 
 1. Client submits a transfer request with an `executeAfterSeconds` parameter (1 to 5,184,000 seconds / 60 days).
 2. `scheduledTransfer.ts` builds an inner `TransferTransaction` and wraps it in a `ScheduleCreateTransaction`.
@@ -346,16 +481,18 @@ The system supports Hedera Scheduled Transactions via `POST /schedule-transfer`,
 
 ---
 
-## 11. Consensus Event Logging (Hedera Consensus Service)
+## 12. Consensus Event Logging (Hedera Consensus Service)
 
 Every signing decision is optionally recorded on Hedera Consensus Service (HCS) for a tamper-proof, decentralized audit trail.
 
-### Architecture
+### Dual Audit Architecture
 
-```
-Lambda (signing decision)
-  ├── DynamoDB (primary audit — fast, queryable)
-  └── HCS Topic (decentralized audit — tamper-proof, verifiable)
+```mermaid
+graph LR
+    Lambda[⚡ Lambda<br/>Signing Decision] -->|Primary| DDB[📝 DynamoDB<br/>Fast + Queryable]
+    Lambda -->|Decentralized| HCS[📜 HCS Topic<br/>Tamper-proof]
+    DDB -.->|Query| Compliance[👥 Compliance Team]
+    HCS -.->|Verify| Anyone[🌍 Anyone with Topic ID]
 ```
 
 ### Flow
