@@ -97,7 +97,7 @@ export class HederaKmsSignerStack extends cdk.Stack {
         POLICY_ALLOWED_TRANSACTION_TYPES: 'CryptoTransfer,TokenTransfer',
         POLICY_ALLOWED_HOURS_START: '8',
         POLICY_ALLOWED_HOURS_END: '22',
-        HCS_TOPIC_ID: '',  // Set after creating topic via POST /create-audit-topic
+        HCS_TOPIC_ID: '0.0.8310543',
       },
       bundling: {
         minify: true,
