@@ -1,0 +1,22 @@
+# Environment variables (NEVER commit keys)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Node
+node_modules/
+dist/
+.aws-sam/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SAM/CDK build artifacts
+cdk.out/
+samconfig.toml

@@ -1,0 +1,38 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /sign-transfer",
+  "rawPath": "/sign-transfer",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIiLCJzY29wZSI6InNpZ25pbmciLCJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLnVzLWVhc3QtMS5hbWF6b25hd3MuY29tL3Rlc3QiLCJhdWQiOiJoZWRlcmEtc2lnbmVyLWFwaSJ9.placeholder"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "abc123",
+    "authorizer": {
+      "jwt": {
+        "claims": {
+          "sub": "test-user",
+          "scope": "signing"
+        }
+      }
+    },
+    "domainName": "abc123.execute-api.us-east-1.amazonaws.com",
+    "domainPrefix": "abc123",
+    "http": {
+      "method": "POST",
+      "path": "/sign-transfer",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "SAM/local"
+    },
+    "requestId": "req-ctx-id-001",
+    "routeKey": "POST /sign-transfer",
+    "stage": "$default",
+    "time": "2025-01-15T12:00:00Z",
+    "timeEpoch": 1736942400000
+  },
+  "body": "{\"requestId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"senderAccountId\":\"0.0.8291501\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1.5,\"memo\":\"Test transfer via SAM local\"}",
+  "isBase64Encoded": false
+}
