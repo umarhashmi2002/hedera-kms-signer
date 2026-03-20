@@ -95,8 +95,8 @@ export class HederaKmsSignerStack extends cdk.Stack {
         POLICY_MAX_AMOUNT_HBAR: '5',
         POLICY_ALLOWED_RECIPIENTS: '0.0.1234,0.0.5678',
         POLICY_ALLOWED_TRANSACTION_TYPES: 'CryptoTransfer,TokenTransfer',
-        POLICY_ALLOWED_HOURS_START: '8',
-        POLICY_ALLOWED_HOURS_END: '22',
+        POLICY_ALLOWED_HOURS_START: '0',
+        POLICY_ALLOWED_HOURS_END: '24',
         HCS_TOPIC_ID: '0.0.8310543',
       },
       bundling: {

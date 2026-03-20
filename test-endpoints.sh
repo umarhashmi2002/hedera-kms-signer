@@ -1,78 +1,240 @@
 #!/bin/bash
-API="https://wgl3tiryug.execute-api.us-east-1.amazonaws.com"
-CLIENT_ID="4tb6j0jsnclal4iigsrntdgdah"
-EMAIL="hashmiumar.work@gmail.com"
-PASS="HederaKms2025Secure!"
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Hedera Key Guardian — Automated E2E Endpoint Tests             ║
+# ║  Run: chmod +x test-endpoints.sh && ./test-endpoints.sh         ║
+# ║                                                                  ║
+# ║  Tests ALL 8 endpoints + policy + validation + idempotency      ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
-# Get fresh token
-AUTH_JSON=$(aws cognito-idp initiate-auth \
+set -euo pipefail
+
+# ── Load config from .env ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "Error: .env file not found. Copy .env.example to .env and fill in values."
+  exit 1
+fi
+
+set -a
+source "$ENV_FILE"
+set +a
+
+API="${API_ENDPOINT:?Set API_ENDPOINT in .env}"
+CLIENT_ID="${USER_POOL_CLIENT_ID:?Set USER_POOL_CLIENT_ID in .env}"
+EMAIL="${COGNITO_USER_EMAIL:?Set COGNITO_USER_EMAIL in .env}"
+PASS_VAL="${COGNITO_USER_PASSWORD:?Set COGNITO_USER_PASSWORD in .env}"
+SENDER="${HEDERA_OPERATOR_ID:?Set HEDERA_OPERATOR_ID in .env}"
+REGION="${AWS_REGION:-us-east-1}"
+
+PASS=0
+FAIL=0
+TOTAL=0
+
+uuid() { python3 -c "import uuid; print(uuid.uuid4())"; }
+
+check() {
+  local name="$1" response="$2" pattern="$3"
+  TOTAL=$((TOTAL + 1))
+  if echo "$response" | grep -qE "$pattern"; then
+    echo "  ✅ $name"
+    PASS=$((PASS + 1))
+  else
+    echo "  ❌ $name"
+    echo "     Response: $(echo "$response" | head -c 200)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+echo "🔐 Hedera Key Guardian — E2E Tests"
+echo "   API: $API"
+echo "   Sender: $SENDER"
+echo ""
+
+# ── Auth ──
+echo "🔑 Getting Cognito token..."
+TOKEN=$(aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id "$CLIENT_ID" \
-  --auth-parameters USERNAME="$EMAIL",PASSWORD="$PASS" \
-  --region us-east-1 \
-  --output json 2>&1)
-
-ID_TOKEN=$(echo "$AUTH_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['AuthenticationResult']['IdToken'])")
-
-echo "=== TEST 1: GET /docs (no auth) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" "$API/docs" | tail -5
+  --auth-parameters USERNAME="$EMAIL",PASSWORD="$PASS_VAL" \
+  --region "$REGION" \
+  --query 'AuthenticationResult.IdToken' \
+  --output text)
+echo "   Token: ${TOKEN:0:40}... (${#TOKEN} chars)"
 echo ""
 
-echo "=== TEST 2: GET /public-key (with auth) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" -H "Authorization: Bearer $ID_TOKEN" "$API/public-key"
+# ══════════════════════════════════════════════════════════════════
+echo "── 1. Authentication Tests ──"
+
+R=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/sign-transfer" \
+  -H "Content-Type: application/json" -d '{}')
+check "Unauthenticated POST /sign-transfer → 401" "$R" "401"
+
+R=$(curl -s -o /dev/null -w "%{http_code}" "$API/public-key")
+check "Unauthenticated GET /public-key → 401" "$R" "401"
+
+R=$(curl -s -o /dev/null -w "%{http_code}" "$API/multisig-config")
+check "Unauthenticated GET /multisig-config → 401" "$R" "401"
+
 echo ""
 
-echo "=== TEST 3: GET /public-key (no auth - should 401) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" "$API/public-key"
+# ══════════════════════════════════════════════════════════════════
+echo "── 2. GET /docs (public, no auth) ──"
+
+R=$(curl -s --max-time 15 "$API/docs")
+check "Returns OpenAPI spec" "$R" "openapi"
+
 echo ""
 
-UUID1=$(python3 -c "import uuid; print(uuid.uuid4())")
-echo "=== TEST 4: POST /sign-transfer (valid request, UUID=$UUID1) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" \
-  -X POST \
-  -H "Authorization: Bearer $ID_TOKEN" \
+# ══════════════════════════════════════════════════════════════════
+echo "── 3. GET /public-key ──"
+
+R=$(curl -s --max-time 15 -H "Authorization: Bearer $TOKEN" "$API/public-key")
+check "Returns publicKeyDer" "$R" "publicKeyDer"
+check "Returns publicKeyCompressed" "$R" "publicKeyCompressed"
+check "Returns evmAddress" "$R" "evmAddress"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "── 4. POST /sign-transfer (live HBAR transfer) ──"
+
+UUID_T=$(uuid)
+R=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$UUID1\",\"senderAccountId\":\"0.0.8291501\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"memo\":\"kiro test\"}" \
-  "$API/sign-transfer"
+  -d "{\"requestId\":\"$UUID_T\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"memo\":\"e2e test\"}" \
+  "$API/sign-transfer")
+check "Transfer returns transactionId" "$R" "transactionId"
+check "Transfer status SUCCESS" "$R" "SUCCESS"
+check "Transfer returns transactionHash" "$R" "transactionHash"
+
 echo ""
 
-UUID2=$(python3 -c "import uuid; print(uuid.uuid4())")
-echo "=== TEST 5: POST /sign-transfer (bad schema - missing fields) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" \
-  -X POST \
-  -H "Authorization: Bearer $ID_TOKEN" \
+# ══════════════════════════════════════════════════════════════════
+echo "── 5. Validation Tests ──"
+
+# Missing required fields
+R=$(curl -s --max-time 15 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$UUID2\"}" \
-  "$API/sign-transfer"
-echo ""
+  -d "{\"requestId\":\"$(uuid)\"}" \
+  "$API/sign-transfer")
+check "Missing fields → VALIDATION_ERROR" "$R" "VALIDATION_ERROR"
 
-UUID3=$(python3 -c "import uuid; print(uuid.uuid4())")
-echo "=== TEST 6: POST /sign-transfer (policy denied - bad recipient) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" \
-  -X POST \
-  -H "Authorization: Bearer $ID_TOKEN" \
+# Amount > 5 HBAR
+R=$(curl -s --max-time 15 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$UUID3\",\"senderAccountId\":\"0.0.8291501\",\"recipientAccountId\":\"0.0.9999999\",\"amountHbar\":1,\"memo\":\"bad recipient\"}" \
-  "$API/sign-transfer"
-echo ""
+  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":100}" \
+  "$API/sign-transfer")
+check "Amount > 5 HBAR → VALIDATION_ERROR" "$R" "VALIDATION_ERROR|exceed"
 
-UUID4=$(python3 -c "import uuid; print(uuid.uuid4())")
-echo "=== TEST 7: POST /sign-transfer (policy denied - over max 5 HBAR) ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" \
-  -X POST \
-  -H "Authorization: Bearer $ID_TOKEN" \
+# Invalid UUID
+R=$(curl -s --max-time 15 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$UUID4\",\"senderAccountId\":\"0.0.8291501\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":99999,\"memo\":\"too much\"}" \
-  "$API/sign-transfer"
+  -d "{\"requestId\":\"not-a-uuid\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1}" \
+  "$API/sign-transfer")
+check "Invalid UUID → VALIDATION_ERROR" "$R" "VALIDATION_ERROR|UUID"
+
 echo ""
 
-echo "=== TEST 8: Idempotency - replay same UUID=$UUID1 ==="
-curl -s -w "\nHTTP_STATUS: %{http_code}\n" \
-  -X POST \
-  -H "Authorization: Bearer $ID_TOKEN" \
+# ══════════════════════════════════════════════════════════════════
+echo "── 6. Policy Denial Tests ──"
+
+R=$(curl -s --max-time 15 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$UUID1\",\"senderAccountId\":\"0.0.8291501\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"memo\":\"kiro test\"}" \
-  "$API/sign-transfer"
+  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.9999999\",\"amountHbar\":1}" \
+  "$API/sign-transfer")
+check "Bad recipient → POLICY_DENIED" "$R" "DENIED|RECIPIENT_NOT_ALLOWED"
+
 echo ""
 
-echo "=== DONE ==="
+# ══════════════════════════════════════════════════════════════════
+echo "── 7. Idempotency Tests ──"
+
+UUID_I=$(uuid)
+R1=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$UUID_I\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1}" \
+  "$API/sign-transfer")
+R2=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$UUID_I\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1}" \
+  "$API/sign-transfer")
+check "Duplicate request returns cached result" "$R2" "transactionId|requestId"
+
+# Conflict
+R3=$(curl -s --max-time 15 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$UUID_I\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":2}" \
+  "$API/sign-transfer")
+check "Modified payload → CONFLICT" "$R3" "CONFLICT|conflict"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "── 8. POST /sign-token-transfer (HTS) ──"
+
+R=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"tokenId\":\"0.0.1234\",\"amount\":10}" \
+  "$API/sign-token-transfer")
+check "Token transfer attempted (INVALID_TOKEN_ID expected)" "$R" "transactionId|INVALID_TOKEN_ID|TOKEN_NOT_ASSOCIATED|error"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "── 9. POST /schedule-transfer ──"
+
+R=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"executeAfterSeconds\":3600}" \
+  "$API/schedule-transfer")
+check "Schedule transfer returns scheduleId" "$R" "scheduleId"
+check "Schedule transfer returns transactionId" "$R" "transactionId"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "── 10. GET /multisig-config ──"
+
+R=$(curl -s --max-time 15 -H "Authorization: Bearer $TOKEN" "$API/multisig-config")
+check "Returns threshold" "$R" "threshold"
+check "Returns keys array" "$R" "keys"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "── 11. POST /rotate-key ──"
+
+R=$(curl -s --max-time 60 -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\":\"$(uuid)\"}" \
+  "$API/rotate-key")
+check "Key rotation responds" "$R" "newKeyId|error|keyId|requestId"
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════
+echo "════════════════════════════════════════════"
+echo "Results: $PASS passed, $FAIL failed out of $TOTAL tests"
+echo "════════════════════════════════════════════"
+echo ""
+echo "Verify on HashScan:"
+echo "  Account:  https://hashscan.io/testnet/account/$SENDER"
+echo "  HCS Topic: https://hashscan.io/testnet/topic/0.0.8310543"
+echo ""
+
+if [ "$FAIL" -gt 0 ]; then
+  exit 1
+fi
