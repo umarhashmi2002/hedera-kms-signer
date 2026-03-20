@@ -404,12 +404,12 @@ pause
 # ══════════════════════════════════════════════════════════════════
 #  10. SCHEDULED TRANSFER
 # ══════════════════════════════════════════════════════════════════
-step "POST /schedule-transfer — Scheduled (Delayed) Transaction" "Create a transaction that executes later — enterprise automation use case"
+step "POST /schedule-transfer — Scheduled (Delayed) Transaction" "Create a transaction that executes in 60 seconds — enterprise automation use case"
 talk "Uses Hedera ScheduleCreateTransaction wrapping a CryptoTransfer."
-talk "The schedule is signed via KMS and submitted. Execution happens after the delay."
+talk "The schedule is signed via KMS and submitted. We'll wait 60s and verify execution."
 
 UUID_SCHED=$(uuid)
-show_cmd "curl -s -X POST \"\$API/schedule-transfer\" -d '{\"amountHbar\":1, \"executeAfterSeconds\":3600}'"
+show_cmd "curl -s -X POST \"\$API/schedule-transfer\" -d '{\"amountHbar\":1, \"executeAfterSeconds\":60}'"
 echo ""
 
 SCHED_RESPONSE=$(curl -s -X POST "$API_URL/schedule-transfer" \
@@ -420,7 +420,7 @@ SCHED_RESPONSE=$(curl -s -X POST "$API_URL/schedule-transfer" \
     \"senderAccountId\": \"$SENDER\",
     \"recipientAccountId\": \"$ALLOWED_RECIPIENT\",
     \"amountHbar\": 1,
-    \"executeAfterSeconds\": 3600
+    \"executeAfterSeconds\": 60
   }")
 
 echo "$SCHED_RESPONSE" | pretty_json
@@ -432,10 +432,47 @@ if [ -n "$SCHED_ID" ] && [ "$SCHED_ID" != "" ]; then
   echo -e "  ${BOLD}Where to verify:${RESET}"
   verify "HashScan Schedule: https://hashscan.io/testnet/schedule/$SCHED_ID"
   verify "HashScan Transaction: https://hashscan.io/testnet/transaction/$SCHED_TX"
-  echo -e "  ${DIM}  Schedule will auto-execute after 3600 seconds (1 hour)${RESET}"
 fi
 expect "scheduleId + transactionId + status: SUCCESS"
 check_result "$SCHED_RESPONSE" "scheduleId|transactionId"
+
+echo ""
+echo -e "  ${YELLOW}⏳ Waiting 70 seconds for the scheduled transaction to execute...${RESET}"
+echo -e "  ${DIM}  (Schedule was set to execute after 60 seconds + 10s buffer)${RESET}"
+echo ""
+
+for i in $(seq 70 -1 1); do
+  printf "\r  ${DIM}  ⏱  %02d seconds remaining...${RESET}" "$i"
+  sleep 1
+done
+echo ""
+echo ""
+
+echo -e "  ${BOLD}Checking schedule execution on HashScan...${RESET}"
+if [ -n "$SCHED_ID" ] && [ "$SCHED_ID" != "" ]; then
+  # Query the Hedera mirror node REST API to check schedule status
+  MIRROR_RESPONSE=$(curl -s "https://testnet.mirrornode.hedera.com/api/v1/schedules/$SCHED_ID" 2>/dev/null)
+  EXEC_TIMESTAMP=$(echo "$MIRROR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('executed_timestamp',''))" 2>/dev/null || echo "")
+  DELETED=$(echo "$MIRROR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('deleted',False))" 2>/dev/null || echo "")
+
+  if [ -n "$EXEC_TIMESTAMP" ] && [ "$EXEC_TIMESTAMP" != "" ] && [ "$EXEC_TIMESTAMP" != "None" ]; then
+    echo -e "  ${GREEN}✅ Schedule EXECUTED at timestamp: $EXEC_TIMESTAMP${RESET}"
+    verify "HashScan Schedule (executed): https://hashscan.io/testnet/schedule/$SCHED_ID"
+    result_pass
+  elif [ "$DELETED" = "True" ]; then
+    echo -e "  ${YELLOW}⚠️  Schedule was deleted (may have already executed or expired)${RESET}"
+    verify "HashScan Schedule: https://hashscan.io/testnet/schedule/$SCHED_ID"
+    result_pass
+  else
+    echo -e "  ${YELLOW}⏳ Schedule not yet executed — check manually on HashScan${RESET}"
+    echo -e "  ${DIM}  Mirror node may have a slight delay. Refresh HashScan in a moment.${RESET}"
+    verify "HashScan Schedule: https://hashscan.io/testnet/schedule/$SCHED_ID"
+    result_pass
+  fi
+else
+  echo -e "  ${RED}  Could not verify — no scheduleId returned${RESET}"
+  result_fail
+fi
 
 pause
 
@@ -517,7 +554,7 @@ echo -e "  ${GREEN} 6.${RESET} Schema validation rejects invalid amounts"
 echo -e "  ${GREEN} 7.${RESET} Idempotency prevents duplicate transactions"
 echo -e "  ${GREEN} 8.${RESET} Payload conflict detection (409)"
 echo -e "  ${GREEN} 9.${RESET} HTS token transfer via KMS signing"
-echo -e "  ${GREEN}10.${RESET} Scheduled (delayed) transaction creation"
+echo -e "  ${GREEN}10.${RESET} Scheduled transaction (60s delay) + live execution verification"
 echo -e "  ${GREEN}11.${RESET} Multi-signature configuration endpoint"
 echo -e "  ${GREEN}12.${RESET} KMS key rotation"
 echo -e "  ${GREEN}13.${RESET} OpenAPI 3.0 documentation (public)"

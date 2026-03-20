@@ -197,7 +197,7 @@ echo "── 9. POST /schedule-transfer ──"
 R=$(curl -s --max-time 60 -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"executeAfterSeconds\":3600}" \
+  -d "{\"requestId\":\"$(uuid)\",\"senderAccountId\":\"$SENDER\",\"recipientAccountId\":\"0.0.1234\",\"amountHbar\":1,\"executeAfterSeconds\":60}" \
   "$API/schedule-transfer")
 check "Schedule transfer returns scheduleId" "$R" "scheduleId"
 check "Schedule transfer returns transactionId" "$R" "transactionId"
