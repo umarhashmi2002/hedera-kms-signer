@@ -36,11 +36,12 @@ export const defaultPolicyConfig: PolicyConfig = loadPolicyConfig();
 export function evaluatePolicy(
   request: SignTransferRequest,
   config: PolicyConfig,
+  transactionType: string = 'CryptoTransfer',
 ): PolicyResult {
   const violations: string[] = [];
 
-  // Rule 1: AMOUNT_EXCEEDS_MAX
-  if (request.amountHbar > config.maxAmountHbar) {
+  // Rule 1: AMOUNT_EXCEEDS_MAX (only for CryptoTransfer — token amounts use different units)
+  if (transactionType === 'CryptoTransfer' && request.amountHbar > config.maxAmountHbar) {
     violations.push('AMOUNT_EXCEEDS_MAX');
   }
 
@@ -50,7 +51,7 @@ export function evaluatePolicy(
   }
 
   // Rule 3: TRANSACTION_TYPE_NOT_ALLOWED
-  if (!config.allowedTransactionTypes.includes('CryptoTransfer')) {
+  if (!config.allowedTransactionTypes.includes(transactionType)) {
     violations.push('TRANSACTION_TYPE_NOT_ALLOWED');
   }
 

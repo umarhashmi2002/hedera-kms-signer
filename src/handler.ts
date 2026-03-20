@@ -1,10 +1,14 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { validateSignTransferRequest } from './schemas.js';
+import { validateSignTransferRequest, validateSignTokenTransferRequest, validateScheduleTransferRequest } from './schemas.js';
 import { evaluatePolicy, defaultPolicyConfig } from './policy.js';
 import { writeAuditRecord, getExistingRecord, computePayloadHash } from './audit.js';
 import { buildAndSubmitTransfer } from './hedera.js';
+import { buildAndSubmitTokenTransfer } from './tokenTransfer.js';
+import { buildAndSubmitScheduledTransfer } from './scheduledTransfer.js';
+import { submitConsensusLog, createAuditTopic } from './consensus.js';
 import { getPublicKeyInfo } from './publicKey.js';
 import { rotateSigningKey } from './rotation.js';
+import { getMultiSigConfig } from './multisig.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +55,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === 'POST' && path === '/sign-transfer') {
       return await handleSignTransfer(event);
     }
+    if (method === 'POST' && path === '/sign-token-transfer') {
+      return await handleSignTokenTransfer(event);
+    }
     if (method === 'GET' && path === '/public-key') {
       return await handleGetPublicKey();
     }
@@ -59,6 +66,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
     if (method === 'POST' && path === '/rotate-key') {
       return await handleRotateKey();
+    }
+    if (method === 'POST' && path === '/schedule-transfer') {
+      return await handleScheduleTransfer(event);
+    }
+    if (method === 'POST' && path === '/create-audit-topic') {
+      return await handleCreateAuditTopic();
+    }
+    if (method === 'GET' && path === '/multisig-config') {
+      return handleGetMultiSigConfig();
     }
 
     return jsonResponse(404, { error: 'Not found' });
@@ -211,6 +227,21 @@ async function handleSignTransfer(event: APIGatewayProxyEventV2): Promise<APIGat
     console.error('Failed to write success audit record:', auditError);
   }
 
+  // Best-effort HCS consensus log
+  try {
+    await submitConsensusLog({
+      event: 'SIGN_REQUEST',
+      requestId: request.requestId,
+      status: 'APPROVED',
+      timestamp: new Date().toISOString(),
+      account: request.senderAccountId,
+      transactionType: 'CryptoTransfer',
+      hederaTransactionId: transactionId,
+    });
+  } catch {
+    // Non-blocking — HCS logging failure should not affect the response
+  }
+
   return jsonResponse(httpStatus, responseBody);
 }
 
@@ -268,4 +299,356 @@ async function handleRotateKey(): Promise<APIGatewayProxyResultV2> {
     const message = error instanceof Error ? error.message : 'Key rotation failed';
     return jsonResponse(500, { error: 'ROTATION_ERROR', message });
   }
+}
+
+/**
+ * POST /sign-token-transfer
+ *
+ * Sign and submit a Hedera Token Service (HTS) transfer.
+ * Same flow as /sign-transfer but for fungible tokens instead of HBAR.
+ */
+async function handleSignTokenTransfer(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const callerIdentity = extractCallerIdentity(event);
+
+  let body: unknown;
+  try {
+    body = JSON.parse(event.body ?? '{}');
+  } catch {
+    return jsonResponse(400, { error: 'VALIDATION_ERROR', details: ['Invalid JSON body'] });
+  }
+
+  const validation = validateSignTokenTransferRequest(body);
+  if (!validation.valid) {
+    return jsonResponse(400, { error: 'VALIDATION_ERROR', details: validation.errors });
+  }
+
+  const request = validation.data;
+  const payloadHash = computePayloadHash(request);
+
+  // Check idempotency
+  try {
+    const existing = await getExistingRecord(request.requestId, payloadHash);
+    if (existing) {
+      if (existing.conflict) {
+        return jsonResponse(409, {
+          error: 'CONFLICT',
+          message: 'requestId already used with a different payload',
+        });
+      }
+      const cachedStatus = existing.record.httpStatus ?? 200;
+      const cachedBody = existing.record.responseBody ?? {
+        transactionId: existing.record.hederaTransactionId,
+        status: existing.record.submissionResult,
+      };
+      return jsonResponse(cachedStatus, cachedBody);
+    }
+  } catch (error: unknown) {
+    console.error('Error checking idempotency:', error);
+  }
+
+  // Evaluate policy (using TokenTransfer type)
+  const policyRequest = {
+    requestId: request.requestId,
+    senderAccountId: request.senderAccountId,
+    recipientAccountId: request.recipientAccountId,
+    amountHbar: 0, // Not applicable for token transfers
+    memo: request.memo,
+  };
+  const policyResult = evaluatePolicy(policyRequest, defaultPolicyConfig, 'TokenTransfer');
+  if (!policyResult.approved) {
+    const httpStatus = 403;
+    const responseBody = { error: 'POLICY_DENIED', violations: policyResult.violations };
+
+    try {
+      await writeAuditRecord({
+        requestId: request.requestId,
+        callerIdentity,
+        timestamp: new Date().toISOString(),
+        transactionType: 'TokenTransfer',
+        transactionParams: request,
+        payloadHash,
+        policyDecision: 'denied',
+        policyViolations: policyResult.violations,
+        httpStatus,
+        responseBody,
+      });
+    } catch (auditError: unknown) {
+      console.error('Failed to write denial audit record:', auditError);
+    }
+
+    return jsonResponse(httpStatus, responseBody);
+  }
+
+  // Build, sign, and submit
+  let transactionId: string;
+  let status: string;
+  let transactionHash: string;
+
+  try {
+    const result = await buildAndSubmitTokenTransfer({
+      senderAccountId: request.senderAccountId,
+      recipientAccountId: request.recipientAccountId,
+      tokenId: request.tokenId,
+      amount: request.amount,
+      memo: request.memo,
+    });
+    transactionId = result.transactionId;
+    status = result.status;
+    transactionHash = result.transactionHash;
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const httpStatus = 502;
+    const responseBody = { error: 'SUBMISSION_ERROR', message: errorMessage };
+
+    try {
+      await writeAuditRecord({
+        requestId: request.requestId,
+        callerIdentity,
+        timestamp: new Date().toISOString(),
+        transactionType: 'TokenTransfer',
+        transactionParams: request,
+        payloadHash,
+        policyDecision: 'approved',
+        signingOutcome: 'failure',
+        signingError: errorMessage,
+        httpStatus,
+        responseBody,
+      });
+    } catch (auditError: unknown) {
+      console.error('Failed to write failure audit record:', auditError);
+    }
+
+    return jsonResponse(httpStatus, responseBody);
+  }
+
+  const httpStatus = 200;
+  const responseBody = { transactionId, status, transactionHash };
+
+  try {
+    await writeAuditRecord({
+      requestId: request.requestId,
+      callerIdentity,
+      timestamp: new Date().toISOString(),
+      transactionType: 'TokenTransfer',
+      transactionParams: request,
+      payloadHash,
+      policyDecision: 'approved',
+      signingOutcome: 'success',
+      hederaTransactionId: transactionId,
+      submissionResult: status,
+      transactionHash,
+      httpStatus,
+      responseBody,
+    });
+  } catch (auditError: unknown) {
+    console.error('Failed to write success audit record:', auditError);
+  }
+
+  // Best-effort HCS consensus log
+  try {
+    await submitConsensusLog({
+      event: 'SIGN_REQUEST',
+      requestId: request.requestId,
+      status: 'APPROVED',
+      timestamp: new Date().toISOString(),
+      account: request.senderAccountId,
+      transactionType: 'TokenTransfer',
+      hederaTransactionId: transactionId,
+    });
+  } catch {
+    // Non-blocking — HCS logging failure should not affect the response
+  }
+
+  return jsonResponse(httpStatus, responseBody);
+}
+
+/**
+ * POST /schedule-transfer
+ *
+ * Schedule a CryptoTransfer for future execution using Hedera Scheduled Transactions.
+ * Same flow as /sign-transfer but wraps the transfer in a ScheduleCreateTransaction.
+ */
+async function handleScheduleTransfer(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const callerIdentity = extractCallerIdentity(event);
+
+  let body: unknown;
+  try {
+    body = JSON.parse(event.body ?? '{}');
+  } catch {
+    return jsonResponse(400, { error: 'VALIDATION_ERROR', details: ['Invalid JSON body'] });
+  }
+
+  const validation = validateScheduleTransferRequest(body);
+  if (!validation.valid) {
+    return jsonResponse(400, { error: 'VALIDATION_ERROR', details: validation.errors });
+  }
+
+  const request = validation.data;
+  const payloadHash = computePayloadHash(request);
+
+  // Check idempotency
+  try {
+    const existing = await getExistingRecord(request.requestId, payloadHash);
+    if (existing) {
+      if (existing.conflict) {
+        return jsonResponse(409, {
+          error: 'CONFLICT',
+          message: 'requestId already used with a different payload',
+        });
+      }
+      const cachedStatus = existing.record.httpStatus ?? 200;
+      const cachedBody = existing.record.responseBody ?? {
+        transactionId: existing.record.hederaTransactionId,
+        status: existing.record.submissionResult,
+      };
+      return jsonResponse(cachedStatus, cachedBody);
+    }
+  } catch (error: unknown) {
+    console.error('Error checking idempotency:', error);
+  }
+
+  // Evaluate policy (same rules as CryptoTransfer)
+  const policyRequest = {
+    requestId: request.requestId,
+    senderAccountId: request.senderAccountId,
+    recipientAccountId: request.recipientAccountId,
+    amountHbar: request.amountHbar,
+    memo: request.memo,
+  };
+  const policyResult = evaluatePolicy(policyRequest, defaultPolicyConfig, 'CryptoTransfer');
+  if (!policyResult.approved) {
+    const httpStatus = 403;
+    const responseBody = { error: 'POLICY_DENIED', violations: policyResult.violations };
+
+    try {
+      await writeAuditRecord({
+        requestId: request.requestId,
+        callerIdentity,
+        timestamp: new Date().toISOString(),
+        transactionType: 'ScheduledTransfer',
+        transactionParams: request,
+        payloadHash,
+        policyDecision: 'denied',
+        policyViolations: policyResult.violations,
+        httpStatus,
+        responseBody,
+      });
+    } catch (auditError: unknown) {
+      console.error('Failed to write denial audit record:', auditError);
+    }
+
+    return jsonResponse(httpStatus, responseBody);
+  }
+
+  // Build, sign, and submit the scheduled transaction
+  let scheduleId: string;
+  let transactionId: string;
+  let status: string;
+  let transactionHash: string;
+
+  try {
+    const result = await buildAndSubmitScheduledTransfer({
+      senderAccountId: request.senderAccountId,
+      recipientAccountId: request.recipientAccountId,
+      amountHbar: request.amountHbar,
+      memo: request.memo,
+      executeAfterSeconds: request.executeAfterSeconds,
+    });
+    scheduleId = result.scheduleId;
+    transactionId = result.transactionId;
+    status = result.status;
+    transactionHash = result.transactionHash;
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const httpStatus = 502;
+    const responseBody = { error: 'SUBMISSION_ERROR', message: errorMessage };
+
+    try {
+      await writeAuditRecord({
+        requestId: request.requestId,
+        callerIdentity,
+        timestamp: new Date().toISOString(),
+        transactionType: 'ScheduledTransfer',
+        transactionParams: request,
+        payloadHash,
+        policyDecision: 'approved',
+        signingOutcome: 'failure',
+        signingError: errorMessage,
+        httpStatus,
+        responseBody,
+      });
+    } catch (auditError: unknown) {
+      console.error('Failed to write failure audit record:', auditError);
+    }
+
+    return jsonResponse(httpStatus, responseBody);
+  }
+
+  const httpStatus = 200;
+  const responseBody = { scheduleId, transactionId, status, transactionHash };
+
+  try {
+    await writeAuditRecord({
+      requestId: request.requestId,
+      callerIdentity,
+      timestamp: new Date().toISOString(),
+      transactionType: 'ScheduledTransfer',
+      transactionParams: request,
+      payloadHash,
+      policyDecision: 'approved',
+      signingOutcome: 'success',
+      hederaTransactionId: transactionId,
+      submissionResult: status,
+      transactionHash,
+      httpStatus,
+      responseBody,
+    });
+  } catch (auditError: unknown) {
+    console.error('Failed to write success audit record:', auditError);
+  }
+
+  // Best-effort HCS consensus log
+  try {
+    await submitConsensusLog({
+      event: 'SCHEDULED_TRANSFER',
+      requestId: request.requestId,
+      status: 'APPROVED',
+      timestamp: new Date().toISOString(),
+      account: request.senderAccountId,
+      transactionType: 'ScheduledTransfer',
+      hederaTransactionId: transactionId,
+    });
+  } catch {
+    // Non-blocking — HCS logging failure should not affect the response
+  }
+
+  return jsonResponse(httpStatus, responseBody);
+}
+
+/**
+ * POST /create-audit-topic
+ *
+ * Create a new HCS topic for decentralized audit logging.
+ * The topic's submit key is set to the KMS-derived public key.
+ */
+async function handleCreateAuditTopic(): Promise<APIGatewayProxyResultV2> {
+  try {
+    const result = await createAuditTopic();
+    return jsonResponse(200, result);
+  } catch (error: unknown) {
+    console.error('Failed to create audit topic:', error);
+    const message = error instanceof Error ? error.message : 'Failed to create audit topic';
+    return jsonResponse(500, { error: 'INTERNAL_ERROR', message });
+  }
+}
+
+/**
+ * GET /multisig-config
+ *
+ * Returns the current multi-signature / threshold key configuration.
+ * Useful for operators to verify the signing policy.
+ */
+function handleGetMultiSigConfig(): APIGatewayProxyResultV2 {
+  const config = getMultiSigConfig();
+  return jsonResponse(200, config);
 }

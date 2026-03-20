@@ -94,9 +94,10 @@ export class HederaKmsSignerStack extends cdk.Stack {
         HEDERA_OPERATOR_ID: props.hederaOperatorId,
         POLICY_MAX_AMOUNT_HBAR: '5',
         POLICY_ALLOWED_RECIPIENTS: '0.0.1234,0.0.5678',
-        POLICY_ALLOWED_TRANSACTION_TYPES: 'CryptoTransfer',
+        POLICY_ALLOWED_TRANSACTION_TYPES: 'CryptoTransfer,TokenTransfer',
         POLICY_ALLOWED_HOURS_START: '8',
         POLICY_ALLOWED_HOURS_END: '22',
+        HCS_TOPIC_ID: '',  // Set after creating topic via POST /create-audit-topic
       },
       bundling: {
         minify: true,
@@ -156,6 +157,14 @@ export class HederaKmsSignerStack extends cdk.Stack {
       authorizer: jwtAuthorizer,
     });
 
+    // POST /sign-token-transfer — authenticated (HTS token transfers)
+    httpApi.addRoutes({
+      path: '/sign-token-transfer',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: lambdaIntegration,
+      authorizer: jwtAuthorizer,
+    });
+
     // GET /public-key — authenticated
     httpApi.addRoutes({
       path: '/public-key',
@@ -174,6 +183,30 @@ export class HederaKmsSignerStack extends cdk.Stack {
     // POST /rotate-key — authenticated
     httpApi.addRoutes({
       path: '/rotate-key',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: lambdaIntegration,
+      authorizer: jwtAuthorizer,
+    });
+
+    // GET /multisig-config — authenticated
+    httpApi.addRoutes({
+      path: '/multisig-config',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: lambdaIntegration,
+      authorizer: jwtAuthorizer,
+    });
+
+    // POST /schedule-transfer — authenticated (scheduled transactions)
+    httpApi.addRoutes({
+      path: '/schedule-transfer',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: lambdaIntegration,
+      authorizer: jwtAuthorizer,
+    });
+
+    // POST /create-audit-topic — authenticated (HCS topic creation)
+    httpApi.addRoutes({
+      path: '/create-audit-topic',
       methods: [apigwv2.HttpMethod.POST],
       integration: lambdaIntegration,
       authorizer: jwtAuthorizer,

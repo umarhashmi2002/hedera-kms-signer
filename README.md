@@ -1,6 +1,6 @@
 # Hedera KMS Signer
 
-> Secure Key Management for Onchain Applications — a serverless backend that signs and submits Hedera transactions using AWS KMS-managed ECDSA secp256k1 keys. The private key never leaves FIPS 140-2 Level 3 hardware.
+> Secure Key Management for Onchain Applications — a serverless backend that signs and submits Hedera transactions using AWS KMS-managed ECDSA secp256k1 keys. The private key never leaves FIPS 140-2 validated HSMs.
 
 ```
 Client → API Gateway (JWT) → Lambda → KMS Sign → Hedera Testnet
@@ -79,6 +79,108 @@ This project benefits the Hedera ecosystem by:
 - **Enabling custodial services**: Exchanges, wallets, and custodians can use this pattern to manage Hedera accounts without ever holding private keys in software.
 
 
+## Multi-Signature / Threshold Key Support
+
+Enterprises rarely rely on a single signing key. This system supports Hedera's threshold key architecture:
+
+```
+Account Key (KeyList, threshold = 2-of-3)
+├── KMS Key (hot signer — Lambda signs automatically)
+├── Cold Key (offline/hardware wallet — manual approval)
+└── Recovery Key (break-glass — stored in vault)
+```
+
+How it works:
+- The Hedera account's key is set to a `KeyList` with a configurable threshold (e.g., 2-of-3)
+- The KMS key signs automatically via Lambda for every approved request
+- Additional signatures (cold key, recovery key) are collected out-of-band when the threshold requires them
+- `GET /multisig-config` returns the current key configuration for operator visibility
+
+This pattern enables:
+- **Separation of duties**: No single person or system can authorize a transaction alone
+- **Break-glass recovery**: If the KMS key is compromised, the cold + recovery keys can rotate it out
+- **Compliance**: Multi-party authorization satisfies SOC 2 and PCI DSS requirements
+- **Gradual trust**: Start with 1-of-1 (KMS only), upgrade to 2-of-3 as the system matures
+
+Configure via environment variables:
+```bash
+MULTISIG_ENABLED=true
+MULTISIG_THRESHOLD=2
+MULTISIG_KEYS=kms:<kmsKeyId>:Primary,manual:<coldPubKeyHex>:ColdKey,manual:<recoveryPubKeyHex>:Recovery
+```
+
+## Token Transfer Support (Hedera Token Service)
+
+Beyond HBAR transfers, the system supports Hedera Token Service (HTS) fungible token transfers:
+
+```bash
+curl -X POST "$API_URL/sign-token-transfer" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requestId": "'$(uuidgen | tr '[:upper:]' '[:lower:]')'",
+    "senderAccountId": "0.0.8291501",
+    "recipientAccountId": "0.0.1234",
+    "tokenId": "0.0.TOKEN_ID",
+    "amount": 100,
+    "memo": "Token transfer via KMS"
+  }'
+```
+
+This demonstrates:
+- The same keccak256 + KMS signing bridge works for all Hedera transaction types
+- Policy engine evaluates token transfers (recipient allowlist, hours, tx type)
+- Full audit trail for token operations
+- Extensible to NFTs, token minting, and other HTS operations
+
+## Scheduled Transactions
+
+The system supports Hedera Scheduled Transactions for secure delayed execution:
+
+```bash
+curl -X POST "$API_URL/schedule-transfer" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requestId": "'$(uuidgen | tr '[:upper:]' '[:lower:]')'",
+    "senderAccountId": "0.0.8291501",
+    "recipientAccountId": "0.0.1234",
+    "amountHbar": 1,
+    "executeAfterSeconds": 3600,
+    "memo": "Scheduled payment"
+  }'
+```
+
+This demonstrates:
+- Advanced Hedera usage with `ScheduleCreateTransaction`
+- Secure delayed execution for enterprise automation workflows
+- Same policy engine, audit trail, and idempotency as immediate transfers
+- KMS signs the schedule creation — the inner transfer executes at the scheduled time
+
+## Consensus Event Logging (Hedera Consensus Service)
+
+Every signing decision is optionally recorded on Hedera Consensus Service (HCS) for a tamper-proof, decentralized audit trail:
+
+```bash
+# 1. Create an HCS audit topic (one-time setup)
+curl -X POST "$API_URL/create-audit-topic" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 2. Set HCS_TOPIC_ID in Lambda environment to the returned topicId
+# 3. All subsequent signing requests automatically log to HCS
+```
+
+Each HCS message contains:
+- Event type (SIGN_REQUEST, SCHEDULED_TRANSFER)
+- Request ID, status (APPROVED/DENIED), timestamp
+- Account, transaction type, Hedera transaction ID
+- Policy violations (for denied requests)
+
+Benefits:
+- Tamper-proof audit trail on Hedera consensus
+- Decentralized logging — not dependent on DynamoDB alone
+- Compliance transparency — verifiable by any party with the topic ID
+
 ## Design Decisions
 
 | Decision | Rationale |
@@ -101,7 +203,7 @@ This project benefits the Hedera ecosystem by:
 - **Key rotation** endpoint that creates a new KMS key and updates the Hedera account
 - **OpenAPI 3.0 docs** served at `/docs` (no auth required)
 - **Monitoring**: CloudWatch alarms, CloudTrail logging, SNS email alerts
-- **109 tests** including property-based tests (fast-check) for DER round-trip, signature structure, policy invariants
+- **143 tests** including property-based tests (fast-check) for DER round-trip, signature structure, policy invariants
 
 ## Go-To-Market Strategy
 
@@ -127,8 +229,12 @@ This project benefits the Hedera ecosystem by:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/sign-transfer` | JWT | Sign and submit a CryptoTransfer |
+| `POST` | `/sign-token-transfer` | JWT | Sign and submit an HTS token transfer |
+| `POST` | `/schedule-transfer` | JWT | Schedule a CryptoTransfer for future execution |
 | `GET` | `/public-key` | JWT | Get KMS public key (DER, compressed, uncompressed, EVM address) |
 | `POST` | `/rotate-key` | JWT | Rotate the signing key |
+| `GET` | `/multisig-config` | JWT | View multi-signature / threshold key configuration |
+| `POST` | `/create-audit-topic` | JWT | Create an HCS topic for decentralized audit logging |
 | `GET` | `/docs` | None | OpenAPI 3.0 spec (YAML) |
 
 ## Signing Flow (How It Works)
@@ -301,7 +407,7 @@ Every request (approved, denied, failed) is recorded with caller identity, polic
 |----------|---------|-------------|
 | `POLICY_MAX_AMOUNT_HBAR` | `5` | Maximum transfer amount per request |
 | `POLICY_ALLOWED_RECIPIENTS` | `0.0.1234,0.0.5678` | Comma-separated allowlist |
-| `POLICY_ALLOWED_TRANSACTION_TYPES` | `CryptoTransfer` | Allowed tx types |
+| `POLICY_ALLOWED_TRANSACTION_TYPES` | `CryptoTransfer,TokenTransfer` | Allowed tx types |
 | `POLICY_ALLOWED_HOURS_START` | `8` | UTC hour when signing is allowed (inclusive) |
 | `POLICY_ALLOWED_HOURS_END` | `22` | UTC hour when signing stops (exclusive) |
 
@@ -319,7 +425,7 @@ cd hedera-kms-signer
 npm test
 ```
 
-109 tests across 9 files:
+143 tests across 13 files:
 - Schema validation (edge cases, boundary values)
 - Policy engine (all rule combinations)
 - KMS signing (DER parsing, retry logic)
@@ -327,6 +433,10 @@ npm test
 - Hedera transaction building
 - Audit trail (idempotency, conflict detection)
 - Public key derivation and key rotation
+- Multi-signature configuration
+- Token transfer schema validation
+- Scheduled transfer schema validation
+- Consensus logging
 - Property-based tests (fast-check): DER round-trip, signature structure, policy invariants, payload hash determinism, EVM address derivation
 
 ## Project Structure
@@ -338,11 +448,15 @@ hedera-kms-signer/
 │   ├── schemas.ts      # Request validation (Zod-style)
 │   ├── policy.ts       # Policy engine (amount, recipient, hours, tx type)
 │   ├── hedera.ts       # Transaction builder + keccak256 + KMS signing
+│   ├── tokenTransfer.ts# HTS token transfer builder + signing
+│   ├── scheduledTransfer.ts # Scheduled transaction builder
+│   ├── consensus.ts    # HCS consensus event logging
 │   ├── kms.ts          # KMS Sign/GetPublicKey + DER parsing + retry
 │   ├── audit.ts        # DynamoDB audit trail (immutable writes)
 │   ├── publicKey.ts    # Public key derivation (compressed, EVM address)
 │   ├── rotation.ts     # Key rotation orchestration
-│   └── __tests__/      # 109 unit + property-based tests
+│   ├── multisig.ts     # Multi-signature / threshold key config
+│   └── __tests__/      # 143 unit + property-based tests
 ├── docs/
 │   ├── openapi.yaml    # OpenAPI 3.0 spec (served at GET /docs)
 │   ├── architecture.md # Architecture deep-dive
@@ -356,7 +470,7 @@ hedera-kms-signer/
 
 ## Security
 
-- Private key never leaves KMS (FIPS 140-2 Level 3)
+- Private key never leaves KMS (FIPS 140-2 validated HSMs)
 - Least-privilege IAM: Lambda can only `kms:Sign`, `kms:GetPublicKey`, `dynamodb:PutItem`, `dynamodb:GetItem`
 - Cognito JWT auth with strong password policy (12+ chars, mixed case, digits, symbols)
 - DynamoDB conditional writes prevent audit record tampering

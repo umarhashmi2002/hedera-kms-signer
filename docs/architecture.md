@@ -265,6 +265,116 @@ aws kms disable-key --key-id <OLD_KEY_ID>
 
 ---
 
+## 8. Token Transfer Support (Hedera Token Service)
+
+In addition to HBAR CryptoTransfer, the system supports Hedera Token Service (HTS) fungible token transfers via `POST /sign-token-transfer`.
+
+### Token Transfer Flow
+
+The token transfer flow mirrors the CryptoTransfer flow:
+
+1. `tokenTransfer.ts` constructs a `TransferTransaction` using `addTokenTransfer()` with the token ID, sender, recipient, and amount (in smallest token unit).
+2. The transaction is frozen, hashed with keccak256, and signed via KMS — identical to the CryptoTransfer signing bridge.
+3. The policy engine evaluates the request with `transactionType='TokenTransfer'`. The `AMOUNT_EXCEEDS_MAX` rule is skipped for token transfers (token amounts use different units than HBAR). Recipient allowlist, transaction type allowlist, and time-of-day rules still apply.
+4. Full audit trail is maintained for token transfers, including idempotency and conflict detection.
+
+### Request Schema
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `requestId` | UUID string | Yes | Client-generated UUID for idempotency |
+| `senderAccountId` | string | Yes | Hedera sender account (must match operator) |
+| `recipientAccountId` | string | Yes | Hedera recipient account |
+| `tokenId` | string | Yes | Hedera token ID (format: 0.0.N) |
+| `amount` | integer | Yes | Amount in smallest token unit (positive) |
+| `memo` | string | No | Optional transaction memo (max 100 chars) |
+
+---
+
+## 9. Multi-Signature / Threshold Key Support
+
+Enterprises rarely rely on a single signing key. The system supports Hedera's threshold key architecture via configuration.
+
+### Architecture
+
+```
+Account Key (KeyList, threshold = 2-of-3)
+├── KMS Key (hot signer — Lambda signs automatically)
+├── Cold Key (offline/hardware wallet — manual approval)
+└── Recovery Key (break-glass — stored in vault)
+```
+
+### Configuration
+
+Multi-sig is configured via environment variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `MULTISIG_ENABLED` | Enable threshold key mode | `true` |
+| `MULTISIG_THRESHOLD` | Signatures required | `2` |
+| `MULTISIG_KEYS` | Comma-separated key entries | `kms:<keyId>:Primary,manual:<pubKeyHex>:ColdKey` |
+
+Key entry format: `<method>:<identifier>:<label>` where method is `kms` (automatic) or `manual` (out-of-band).
+
+### Endpoint
+
+`GET /multisig-config` returns the current configuration for operator visibility, including threshold, total keys, and each key's signing method.
+
+When disabled (default), the system operates in single-key mode with the KMS key as the sole signer.
+
+---
+
+## 10. Scheduled Transactions
+
+The system supports Hedera Scheduled Transactions via `POST /schedule-transfer`, enabling secure delayed execution of CryptoTransfer transactions.
+
+### Scheduled Transfer Flow
+
+1. Client submits a transfer request with an `executeAfterSeconds` parameter (1 to 5,184,000 seconds / 60 days).
+2. `scheduledTransfer.ts` builds an inner `TransferTransaction` and wraps it in a `ScheduleCreateTransaction`.
+3. The schedule's expiration time is set to `now + executeAfterSeconds`.
+4. The `ScheduleCreateTransaction` is frozen, hashed with keccak256, and signed via KMS.
+5. The signed schedule is submitted to Hedera. The network returns a `scheduleId`.
+6. The inner transfer executes automatically when all required signatures are present or at the expiration time.
+
+### Use Cases
+
+- **Payroll automation**: Schedule recurring payments to execute at specific times
+- **Escrow**: Hold funds until a future date
+- **Multi-party approval**: Schedule a transaction that requires additional signatures before execution
+- **Compliance**: Enforce cooling-off periods before large transfers
+
+---
+
+## 11. Consensus Event Logging (Hedera Consensus Service)
+
+Every signing decision is optionally recorded on Hedera Consensus Service (HCS) for a tamper-proof, decentralized audit trail.
+
+### Architecture
+
+```
+Lambda (signing decision)
+  ├── DynamoDB (primary audit — fast, queryable)
+  └── HCS Topic (decentralized audit — tamper-proof, verifiable)
+```
+
+### Flow
+
+1. After a successful signing request, the handler submits an HCS message to the configured topic.
+2. The message contains: event type, request ID, status, timestamp, account, transaction type, and Hedera transaction ID.
+3. HCS logging is best-effort — failures do not affect the signing response.
+4. `POST /create-audit-topic` creates a new HCS topic with the KMS-derived public key as the submit key.
+
+### Configuration
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `HCS_TOPIC_ID` | HCS topic ID for audit logging | `0.0.12345` |
+
+When `HCS_TOPIC_ID` is empty (default), HCS logging is silently skipped.
+
+---
+
 ## 6. Security Controls Summary
 
 | Control | Description | Threats Mitigated |
@@ -335,7 +445,7 @@ The Lambda function receives these environment variables from the CDK stack:
 | `HEDERA_OPERATOR_ID` | Hedera operator account ID | `0.0.8291501` |
 | `POLICY_MAX_AMOUNT_HBAR` | Max transfer amount in HBAR | `5` |
 | `POLICY_ALLOWED_RECIPIENTS` | Comma-separated allowed recipient accounts | `0.0.1234,0.0.5678` |
-| `POLICY_ALLOWED_TRANSACTION_TYPES` | Comma-separated allowed transaction types | `CryptoTransfer` |
+| `POLICY_ALLOWED_TRANSACTION_TYPES` | Comma-separated allowed transaction types | `CryptoTransfer,TokenTransfer` |
 | `POLICY_ALLOWED_HOURS_START` | Allowed hours start (UTC, 0-23) | `8` |
 | `POLICY_ALLOWED_HOURS_END` | Allowed hours end (UTC, 0-23) | `22` |
 
@@ -406,6 +516,10 @@ After deploying the stack:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/sign-transfer` | JWT | Submit a CryptoTransfer signing request |
+| `POST` | `/sign-token-transfer` | JWT | Submit an HTS token transfer signing request |
+| `POST` | `/schedule-transfer` | JWT | Schedule a CryptoTransfer for future execution |
 | `GET` | `/public-key` | JWT | Retrieve KMS public key info |
 | `GET` | `/docs` | None | Serve OpenAPI 3.0 specification |
 | `POST` | `/rotate-key` | JWT | Initiate signing key rotation |
+| `GET` | `/multisig-config` | JWT | View multi-signature / threshold key configuration |
+| `POST` | `/create-audit-topic` | JWT | Create an HCS topic for decentralized audit logging |

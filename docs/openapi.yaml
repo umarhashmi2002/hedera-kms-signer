@@ -3,9 +3,10 @@ info:
   title: Hedera KMS Signing API
   description: >
     Serverless Hedera transaction signing backend on AWS.
-    Submit CryptoTransfer signing requests without handling private keys.
-    AWS KMS holds the ECDSA secp256k1 signing key, Lambda orchestrates the
-    signing flow, and DynamoDB provides an immutable audit trail.
+    Submit CryptoTransfer and HTS token transfer signing requests without
+    handling private keys. AWS KMS holds the ECDSA secp256k1 signing key,
+    Lambda orchestrates the signing flow, and DynamoDB provides an immutable
+    audit trail.
   version: "1.0.0"
   contact:
     name: Hedera KMS Signer
@@ -241,6 +242,238 @@ paths:
               example:
                 error: "INTERNAL_ERROR"
 
+  /sign-token-transfer:
+    post:
+      operationId: signTokenTransfer
+      summary: Submit an HTS token transfer signing request
+      description: >
+        Validates the request, evaluates policy rules, builds a Hedera Token
+        Service (HTS) transfer transaction, signs it via AWS KMS, and submits
+        it to the Hedera network. Uses the same keccak256 + KMS signing bridge
+        as CryptoTransfer. Supports idempotency via client-generated requestId.
+      tags:
+        - Signing
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignTokenTransferRequest"
+            example:
+              requestId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+              senderAccountId: "0.0.8291501"
+              recipientAccountId: "0.0.1234"
+              tokenId: "0.0.456789"
+              amount: 100
+              memo: "Token transfer via KMS"
+      responses:
+        "200":
+          description: Token transfer signed and submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignTransferResponse"
+              example:
+                transactionId: "0.0.8291501@1719000000.000000000"
+                status: "SUCCESS"
+                transactionHash: "b4f2c3d5e6f7890123456789abcdef0123456789abcdef0123456789abcdef01"
+        "400":
+          description: Validation error — invalid or missing fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+              example:
+                error: "VALIDATION_ERROR"
+                details:
+                  - "tokenId must be a valid Hedera token ID (0.0.N)"
+                  - "amount must be a positive integer (smallest token unit)"
+        "401":
+          description: Missing or invalid authentication credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Policy denied — request violates one or more policy rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyDeniedError"
+        "409":
+          description: Conflict — requestId reused with a different payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "502":
+          description: Signing or submission error from upstream service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalError"
+
+  /multisig-config:
+    get:
+      operationId: getMultiSigConfig
+      summary: Retrieve multi-signature configuration
+      description: >
+        Returns the current multi-signature / threshold key configuration.
+        Shows whether multi-sig is enabled, the threshold, total keys, and
+        details about each key (label, signing method, public key).
+      tags:
+        - Key Management
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Multi-sig configuration retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiSigConfigResponse"
+              example:
+                enabled: false
+                threshold: 1
+                totalKeys: 1
+                keys:
+                  - label: "KMS Primary"
+                    publicKeyHex: "(derived at runtime from KMS)"
+                    signingMethod: "kms"
+                    kmsKeyId: "alias/hedera-signer-dev"
+                description: "Single-key mode. The KMS key is the sole signer."
+        "401":
+          description: Missing or invalid authentication credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalError"
+
+  /schedule-transfer:
+    post:
+      operationId: scheduleTransfer
+      summary: Schedule a CryptoTransfer for future execution
+      description: >
+        Validates the request, evaluates policy rules, builds a Hedera
+        ScheduleCreateTransaction wrapping a CryptoTransfer, signs it via
+        AWS KMS, and submits it to the Hedera network. The inner transfer
+        executes at the scheduled time. Supports idempotency via requestId.
+      tags:
+        - Signing
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleTransferRequest"
+            example:
+              requestId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+              senderAccountId: "0.0.8291501"
+              recipientAccountId: "0.0.1234"
+              amountHbar: 1
+              executeAfterSeconds: 3600
+              memo: "Scheduled payment"
+      responses:
+        "200":
+          description: Scheduled transaction created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduleTransferResponse"
+              example:
+                scheduleId: "0.0.98765"
+                transactionId: "0.0.8291501@1719000000.000000000"
+                status: "SUCCESS"
+                transactionHash: "c5f3d4e6f7890123456789abcdef0123456789abcdef0123456789abcdef02"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "401":
+          description: Missing or invalid authentication credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Policy denied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyDeniedError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "502":
+          description: Signing or submission error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalError"
+
+  /create-audit-topic:
+    post:
+      operationId: createAuditTopic
+      summary: Create an HCS topic for decentralized audit logging
+      description: >
+        Creates a new Hedera Consensus Service (HCS) topic for recording
+        signing decisions as tamper-proof, decentralized audit entries.
+        The topic's submit key is set to the KMS-derived public key, so
+        only the Lambda function can submit messages. No request body needed.
+      tags:
+        - Audit
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: HCS topic created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAuditTopicResponse"
+              example:
+                topicId: "0.0.12345"
+                transactionId: "0.0.8291501@1719000000.000000000"
+        "401":
+          description: Missing or invalid authentication credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -465,6 +698,169 @@ components:
           type: string
           description: Unauthorized error message
 
+    SignTokenTransferRequest:
+      type: object
+      required:
+        - requestId
+        - senderAccountId
+        - recipientAccountId
+        - tokenId
+        - amount
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Client-generated UUID for idempotency
+          example: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        senderAccountId:
+          type: string
+          pattern: "^0\\.0\\.[1-9]\\d*$"
+          description: "Hedera sender account ID (format: 0.0.N)"
+          example: "0.0.8291501"
+        recipientAccountId:
+          type: string
+          pattern: "^0\\.0\\.[1-9]\\d*$"
+          description: "Hedera recipient account ID (format: 0.0.N)"
+          example: "0.0.1234"
+        tokenId:
+          type: string
+          pattern: "^0\\.0\\.[1-9]\\d*$"
+          description: "Hedera token ID (format: 0.0.N)"
+          example: "0.0.456789"
+        amount:
+          type: integer
+          minimum: 1
+          description: Amount in smallest token unit (positive integer)
+          example: 100
+        memo:
+          type: string
+          maxLength: 100
+          description: Optional transaction memo
+          example: "Token transfer via KMS"
+
+    MultiSigConfigResponse:
+      type: object
+      required:
+        - enabled
+        - threshold
+        - totalKeys
+        - keys
+        - description
+      properties:
+        enabled:
+          type: boolean
+          description: Whether multi-sig is enabled
+        threshold:
+          type: integer
+          description: Number of signatures required
+        totalKeys:
+          type: integer
+          description: Total number of keys in the KeyList
+        keys:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+                description: Human-readable key label
+              publicKeyHex:
+                type: string
+                description: Compressed public key (hex) or placeholder
+              signingMethod:
+                type: string
+                enum: [kms, manual]
+                description: "Signing method: kms (automatic) or manual (out-of-band)"
+              kmsKeyId:
+                type: string
+                description: KMS key ID (only for kms signing method)
+        description:
+          type: string
+          description: Human-readable description of the multi-sig policy
+
+    ScheduleTransferRequest:
+      type: object
+      required:
+        - requestId
+        - senderAccountId
+        - recipientAccountId
+        - amountHbar
+        - executeAfterSeconds
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Client-generated UUID for idempotency
+          example: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+        senderAccountId:
+          type: string
+          pattern: "^0\\.0\\.[1-9]\\d*$"
+          description: "Hedera sender account ID (format: 0.0.N)"
+          example: "0.0.8291501"
+        recipientAccountId:
+          type: string
+          pattern: "^0\\.0\\.[1-9]\\d*$"
+          description: "Hedera recipient account ID (format: 0.0.N)"
+          example: "0.0.1234"
+        amountHbar:
+          type: number
+          minimum: 0
+          exclusiveMinimum: true
+          maximum: 5
+          description: Amount in HBAR to transfer (positive, max 5)
+          example: 1
+        executeAfterSeconds:
+          type: integer
+          minimum: 1
+          maximum: 5184000
+          description: Seconds from now until the scheduled transfer executes (max 60 days)
+          example: 3600
+        memo:
+          type: string
+          maxLength: 100
+          description: Optional schedule memo
+          example: "Scheduled payment"
+
+    ScheduleTransferResponse:
+      type: object
+      required:
+        - scheduleId
+        - transactionId
+        - status
+        - transactionHash
+      properties:
+        scheduleId:
+          type: string
+          description: Hedera schedule ID
+          example: "0.0.98765"
+        transactionId:
+          type: string
+          description: Hedera transaction ID of the ScheduleCreate
+          example: "0.0.8291501@1719000000.000000000"
+        status:
+          type: string
+          description: Hedera receipt status
+          example: "SUCCESS"
+        transactionHash:
+          type: string
+          description: Hex-encoded SHA-256 hash of frozen transaction bytes
+          example: "c5f3d4e6f7890123456789abcdef0123456789abcdef0123456789abcdef02"
+
+    CreateAuditTopicResponse:
+      type: object
+      required:
+        - topicId
+        - transactionId
+      properties:
+        topicId:
+          type: string
+          description: Hedera Consensus Service topic ID
+          example: "0.0.12345"
+        transactionId:
+          type: string
+          description: Hedera transaction ID of the TopicCreate
+          example: "0.0.8291501@1719000000.000000000"
+
 tags:
   - name: Signing
     description: Transaction signing and submission endpoints
@@ -472,5 +868,7 @@ tags:
     description: Public key retrieval and format conversion
   - name: Key Management
     description: Signing key lifecycle management endpoints
+  - name: Audit
+    description: Decentralized audit logging via Hedera Consensus Service
   - name: Documentation
     description: API documentation endpoints
