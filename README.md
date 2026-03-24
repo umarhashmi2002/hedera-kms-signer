@@ -6,19 +6,19 @@
 
 ```mermaid
 graph LR
-    You[👤 You] -->|1. Send request| API[🌐 API Gateway]
-    API -->|2. Check identity| Cognito[🔑 Cognito]
-    API -->|3. Forward| Lambda[⚡ Lambda]
-    Lambda -->|4. Check rules| Policy[📋 Policy Engine]
-    Lambda -->|5. Sign tx| KMS[🔐 AWS KMS HSM]
-    Lambda -->|6. Submit tx| Hedera[🌍 Hedera Network]
-    Lambda -->|7. Log it| DDB[📝 DynamoDB]
-    Lambda -->|8. Log to chain| HCS[📜 HCS Topic]
+    You[You] -->|1. Send request| API[API Gateway]
+    API -->|2. Check identity| Cognito[Cognito]
+    API -->|3. Forward| Lambda[Lambda]
+    Lambda -->|4. Check rules| Policy[Policy Engine]
+    Lambda -->|5. Sign tx| KMS[AWS KMS HSM]
+    Lambda -->|6. Submit tx| Hedera[Hedera Network]
+    Lambda -->|7. Log it| DDB[DynamoDB]
+    Lambda -->|8. Log to chain| HCS[HCS Topic]
 ```
 
 Your private key lives inside AWS KMS hardware. It never comes out. When you want to send HBAR or tokens on Hedera, you call our API. We check your identity (Cognito JWT), enforce policy rules (amount limits, recipient allowlists), then ask KMS hardware to sign the transaction. The signed transaction goes to Hedera. Everything is logged.
 
-## 📁 Documentation
+## Documentation
 
 Detailed docs are in the [`docs/`](docs/) folder:
 
@@ -40,12 +40,12 @@ This project solves that by bridging AWS KMS and Hedera's signing conventions co
 
 ```mermaid
 graph TB
-    Client[👤 API Consumer<br/>curl / Postman / Frontend]
+    Client[API Consumer<br/>curl / Postman / Frontend]
 
-    subgraph AWS["☁️ AWS Cloud"]
-        APIGW[🌐 API Gateway HTTP API<br/>HTTPS + JWT Auth + Rate Limiting]
+    subgraph AWS["AWS Cloud"]
+        APIGW[API Gateway HTTP API<br/>HTTPS + JWT Auth + Rate Limiting]
         
-        subgraph LambdaBox["⚡ Lambda Function - Node.js 20.x"]
+        subgraph LambdaBox["Lambda Function - Node.js 20.x"]
             Handler[handler.ts<br/>Route Dispatch]
             Schemas[schemas.ts<br/>Input Validation]
             Policy[policy.ts<br/>Policy Engine]
@@ -60,15 +60,15 @@ graph TB
             MultiMod[multisig.ts<br/>Multi-sig Config]
         end
 
-        Cognito[🔑 Cognito User Pool<br/>JWT Issuer]
-        KMS[(🔐 AWS KMS<br/>ECDSA secp256k1<br/>FIPS 140-2 HSM)]
-        DDB[(📝 DynamoDB<br/>Audit Trail)]
-        CT[📊 CloudTrail]
-        CW[🔔 CloudWatch Alarms]
-        SNS[📧 SNS Alerts]
+        Cognito[Cognito User Pool<br/>JWT Issuer]
+        KMS[(AWS KMS<br/>ECDSA secp256k1<br/>FIPS 140-2 HSM)]
+        DDB[(DynamoDB<br/>Audit Trail)]
+        CT[CloudTrail]
+        CW[CloudWatch Alarms]
+        SNS[SNS Alerts]
     end
 
-    HederaNet[🌍 Hedera Testnet<br/>Consensus + HCS]
+    HederaNet[Hedera Testnet<br/>Consensus + HCS]
 
     Client -->|HTTPS| APIGW
     APIGW -->|Validate JWT| Cognito
@@ -88,14 +88,14 @@ This is the core innovation — how a transaction goes from API request to Heder
 
 ```mermaid
 sequenceDiagram
-    participant C as 👤 Client
-    participant AG as 🌐 API Gateway
-    participant L as ⚡ Lambda
-    participant P as 📋 Policy
-    participant K as 🔐 KMS HSM
-    participant H as 🌍 Hedera
-    participant A as 📝 DynamoDB
-    participant HCS as 📜 HCS Topic
+    participant C as Client
+    participant AG as API Gateway
+    participant L as Lambda
+    participant P as Policy
+    participant K as KMS HSM
+    participant H as Hedera
+    participant A as DynamoDB
+    participant HCS as HCS Topic
 
     C->>AG: POST /sign-transfer + JWT
     AG->>AG: Validate JWT (Cognito)
@@ -104,12 +104,12 @@ sequenceDiagram
     L->>A: Check idempotency (requestId lookup)
     A-->>L: Not found (new request)
     L->>P: Evaluate policy rules
-    P-->>L: ✅ Approved
+    P-->>L: Approved
     L->>L: Build TransferTransaction
-    L->>L: Freeze tx → keccak256 hash
+    L->>L: Freeze tx, keccak256 hash
     L->>K: Sign digest (ECDSA_SHA_256, DIGEST mode)
     K-->>L: DER signature
-    L->>L: Parse DER → raw (r, s)
+    L->>L: Parse DER, raw (r, s)
     L->>L: Attach signature via signWith()
     L->>H: Submit signed tx
     H-->>L: Receipt (SUCCESS) + txId
@@ -150,7 +150,7 @@ graph TD
     P3 -->|No| DENY
     P3 -->|Yes| P4{Within allowed hours?}
     P4 -->|No| DENY
-    P4 -->|Yes| SIGN[✅ Sign via KMS → Submit to Hedera]
+    P4 -->|Yes| SIGN[Sign via KMS, Submit to Hedera]
 ```
 
 ## Security Layers
@@ -193,22 +193,22 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    participant C as 👤 Client
-    participant L as ⚡ Lambda
-    participant P as 📋 Policy
-    participant K as 🔐 KMS
-    participant H as 🌍 Hedera
+    participant C as Client
+    participant L as Lambda
+    participant P as Policy
+    participant K as KMS
+    participant H as Hedera
 
     C->>L: POST /sign-token-transfer
     Note over C,L: tokenId, amount, sender, recipient
     L->>L: Validate schema
     L->>P: Evaluate policy (type=TokenTransfer)
     Note over P: Amount check skipped for tokens
-    P-->>L: ✅ Approved
+    P-->>L: Approved
     L->>L: Build TransferTransaction<br/>+ addTokenTransfer()
-    L->>L: Freeze → keccak256 hash
+    L->>L: Freeze, keccak256 hash
     L->>K: Sign digest via KMS
-    K-->>L: DER signature → parse (r,s)
+    K-->>L: DER signature, parse (r,s)
     L->>H: Submit signed tx
     H-->>L: Receipt + txId
     L-->>C: { transactionId, status }
@@ -241,10 +241,10 @@ A traditional Web2 approach would store signing keys in a database. This creates
 
 ```mermaid
 sequenceDiagram
-    participant Op as 👤 Operator
-    participant L as ⚡ Lambda
-    participant KMS as 🔐 KMS
-    participant H as 🌍 Hedera
+    participant Op as Operator
+    participant L as Lambda
+    participant KMS as KMS
+    participant H as Hedera
     
     Op->>L: POST /rotate-key
     L->>KMS: CreateKey (new secp256k1)
@@ -264,9 +264,9 @@ sequenceDiagram
 ```mermaid
 graph TD
     Account[Hedera Account Key<br/>KeyList threshold=2-of-3]
-    Account --> K1[🔐 KMS Key<br/>Hot signer - automatic]
-    Account --> K2[🧊 Cold Key<br/>Hardware wallet - manual]
-    Account --> K3[🆘 Recovery Key<br/>Break-glass - vault]
+    Account --> K1[KMS Key<br/>Hot signer - automatic]
+    Account --> K2[Cold Key<br/>Hardware wallet - manual]
+    Account --> K3[Recovery Key<br/>Break-glass - vault]
 ```
 
 Configure via environment variables:
@@ -280,10 +280,10 @@ MULTISIG_KEYS=kms:<kmsKeyId>:Primary,manual:<coldPubKeyHex>:ColdKey,manual:<reco
 
 ```mermaid
 sequenceDiagram
-    participant C as 👤 Client
-    participant L as ⚡ Lambda
-    participant K as 🔐 KMS
-    participant H as 🌍 Hedera
+    participant C as Client
+    participant L as Lambda
+    participant K as KMS
+    participant H as Hedera
 
     C->>L: POST /schedule-transfer<br/>(executeAfterSeconds: 60)
     L->>L: Build inner TransferTransaction
@@ -292,7 +292,7 @@ sequenceDiagram
     L->>H: Submit schedule
     H-->>L: scheduleId + txId
     L-->>C: { scheduleId, status: SUCCESS }
-    Note over H: ⏳ 60 seconds later...
+    Note over H: 60 seconds later...
     H->>H: Auto-execute the transfer
 ```
 
@@ -300,10 +300,10 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    Lambda[⚡ Lambda] -->|Primary audit| DDB[📝 DynamoDB<br/>Fast + Queryable]
-    Lambda -->|Decentralized audit| HCS[📜 HCS Topic<br/>Tamper-proof + Verifiable]
-    DDB -.->|Compliance queries| Team[👥 Compliance Team]
-    HCS -.->|Public verification| Anyone[🌍 Anyone with Topic ID]
+    Lambda[Lambda] -->|Primary audit| DDB[DynamoDB<br/>Fast + Queryable]
+    Lambda -->|Decentralized audit| HCS[HCS Topic<br/>Tamper-proof + Verifiable]
+    DDB -.->|Compliance queries| Team[Compliance Team]
+    HCS -.->|Public verification| Anyone[Anyone with Topic ID]
 ```
 
 Every signing decision is logged to both DynamoDB (fast, queryable) and Hedera Consensus Service (tamper-proof, decentralized). HCS messages contain: event type, requestId, status, timestamp, transactionId, and policy violations.
@@ -312,12 +312,12 @@ Every signing decision is logged to both DynamoDB (fast, queryable) and Hedera C
 
 ```mermaid
 graph TB
-    Lambda[⚡ Lambda] -->|Logs| CWLogs[📊 CloudWatch Logs<br/>7-day retention]
-    KMS[🔐 KMS] -->|API calls| CT[📊 CloudTrail<br/>Encrypted S3]
-    CT -->|Metric filter| CW1[🔔 Alarm: Non-Lambda KMS usage]
-    Lambda -->|Error metric| CW2[🔔 Alarm: Lambda errors > 5%]
-    Lambda -->|Denial metric| CW3[🔔 Alarm: High denial rate]
-    CW1 -->|Alert| SNS[📧 Email Alert]
+    Lambda[Lambda] -->|Logs| CWLogs[CloudWatch Logs<br/>7-day retention]
+    KMS[KMS] -->|API calls| CT[CloudTrail<br/>Encrypted S3]
+    CT -->|Metric filter| CW1[Alarm: Non-Lambda KMS usage]
+    Lambda -->|Error metric| CW2[Alarm: Lambda errors > 5%]
+    Lambda -->|Denial metric| CW3[Alarm: High denial rate]
+    CW1 -->|Alert| SNS[Email Alert]
     CW2 -->|Alert| SNS
     CW3 -->|Alert| SNS
 ```
@@ -446,7 +446,7 @@ hedera-kms-signer/
 ```mermaid
 timeline
     title Hedera Key Guardian — Roadmap
-    section Phase 1 — Hackathon MVP ✅
+    section Phase 1 — Hackathon MVP (Done)
         Core Signing : AWS KMS secp256k1 + keccak256 bridge
         Policy Engine : Amount limits, allowlists, hours, tx types
         Audit Trail : DynamoDB + HCS dual logging

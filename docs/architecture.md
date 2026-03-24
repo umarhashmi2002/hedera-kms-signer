@@ -12,12 +12,12 @@ This document describes the architecture of the Hedera KMS Signing Backend, a se
 
 ```mermaid
 graph TB
-    Client[👤 API Consumer<br/>curl / Postman / Frontend]
+    Client[API Consumer<br/>curl / Postman / Frontend]
 
-    subgraph AWS["☁️ AWS Cloud"]
-        APIGW[🌐 API Gateway HTTP API<br/>HTTPS + JWT Auth + Rate Limiting]
+    subgraph AWS["AWS Cloud"]
+        APIGW[API Gateway HTTP API<br/>HTTPS + JWT Auth + Rate Limiting]
         
-        subgraph LambdaBox["⚡ Lambda Function - Node.js 20.x"]
+        subgraph LambdaBox["Lambda Function - Node.js 20.x"]
             Handler[handler.ts — Route Dispatch]
             Schemas[schemas.ts — Validation]
             Policy[policy.ts — Policy Engine]
@@ -32,15 +32,15 @@ graph TB
             MultiMod[multisig.ts — Multi-sig Config]
         end
 
-        Cognito[🔑 Cognito User Pool<br/>JWT Issuer]
-        KMS[(🔐 AWS KMS<br/>ECDSA secp256k1<br/>FIPS 140-2 HSM)]
-        DDB[(📝 DynamoDB<br/>Audit Trail)]
-        CT[📊 CloudTrail]
-        CW[🔔 CloudWatch Alarms]
-        SNS[📧 SNS Alerts]
+        Cognito[Cognito User Pool<br/>JWT Issuer]
+        KMS[(AWS KMS<br/>ECDSA secp256k1<br/>FIPS 140-2 HSM)]
+        DDB[(DynamoDB<br/>Audit Trail)]
+        CT[CloudTrail]
+        CW[CloudWatch Alarms]
+        SNS[SNS Alerts]
     end
 
-    HederaNet[🌍 Hedera Testnet<br/>Consensus + HCS]
+    HederaNet[Hedera Testnet<br/>Consensus + HCS]
 
     Client -->|HTTPS| APIGW
     APIGW -->|Validate JWT| Cognito
@@ -352,7 +352,7 @@ graph TD
     P3 -->|No| DENY
     P3 -->|Yes| P4{Within hours?}
     P4 -->|No| DENY
-    P4 -->|Yes| SIGN[✅ Sign via KMS]
+    P4 -->|Yes| SIGN[Sign via KMS]
     SIGN --> SUBMIT[Submit to Hedera]
     SUBMIT --> AUDIT[Write Audit + HCS Log]
 ```
@@ -489,10 +489,10 @@ Every signing decision is optionally recorded on Hedera Consensus Service (HCS) 
 
 ```mermaid
 graph LR
-    Lambda[⚡ Lambda<br/>Signing Decision] -->|Primary| DDB[📝 DynamoDB<br/>Fast + Queryable]
-    Lambda -->|Decentralized| HCS[📜 HCS Topic<br/>Tamper-proof]
-    DDB -.->|Query| Compliance[👥 Compliance Team]
-    HCS -.->|Verify| Anyone[🌍 Anyone with Topic ID]
+    Lambda[Lambda<br/>Signing Decision] -->|Primary| DDB[DynamoDB<br/>Fast + Queryable]
+    Lambda -->|Decentralized| HCS[HCS Topic<br/>Tamper-proof]
+    DDB -.->|Query| Compliance[Compliance Team]
+    HCS -.->|Verify| Anyone[Anyone with Topic ID]
 ```
 
 ### Flow

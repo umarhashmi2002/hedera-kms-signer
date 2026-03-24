@@ -14,8 +14,8 @@ The system has five trust boundaries where data crosses between components with 
 
 ```mermaid
 graph TB
-    subgraph External["🌐 External"]
-        Client[👤 Client]
+    subgraph External["External"]
+        Client[Client]
     end
     
     subgraph TB1["Trust Boundary 1: HTTPS + JWT"]
@@ -24,12 +24,12 @@ graph TB
     
     subgraph TB2["Trust Boundary 2: AWS Internal"]
         Lambda[Lambda Function]
-        KMS[🔐 KMS HSM]
-        DDB[📝 DynamoDB]
+        KMS[KMS HSM]
+        DDB[DynamoDB]
     end
     
     subgraph TB3["Trust Boundary 3: External Network"]
-        Hedera[🌍 Hedera Network]
+        Hedera[Hedera Network]
     end
 
     Client -->|HTTPS + JWT| APIGW
@@ -173,12 +173,12 @@ graph TB
 
 ```mermaid
 graph TB
-    Lambda[⚡ Lambda] -->|Logs| CWLogs[📊 CloudWatch Logs]
-    KMS[🔐 KMS] -->|API calls| CT[📊 CloudTrail → S3]
-    CT -->|Metric filter| A1[🔔 Non-Lambda KMS usage]
-    Lambda -->|Error metric| A2[🔔 Lambda errors > 5%]
-    Lambda -->|Denial metric| A3[🔔 High denial rate > 10/5min]
-    A1 -->|Alert| SNS[📧 Email via SNS]
+    Lambda[Lambda] -->|Logs| CWLogs[CloudWatch Logs]
+    KMS[KMS] -->|API calls| CT[CloudTrail, S3]
+    CT -->|Metric filter| A1[Non-Lambda KMS usage]
+    Lambda -->|Error metric| A2[Lambda errors > 5%]
+    Lambda -->|Denial metric| A3[High denial rate > 10/5min]
+    A1 -->|Alert| SNS[Email via SNS]
     A2 -->|Alert| SNS
     A3 -->|Alert| SNS
 ```

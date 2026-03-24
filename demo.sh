@@ -307,11 +307,11 @@ check_result "$DENY_AMOUNT" "VALIDATION_ERROR|exceed"
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  7. IDEMPOTENCY — DUPLICATE REQUEST
+#  7. IDEMPOTENCY — DUPLICATE + CONFLICT
 # ══════════════════════════════════════════════════════════════════
-step "Idempotency — Duplicate Request Protection" "Same requestId + same payload = cached result (no re-signing, no duplicate tx)"
-talk "DynamoDB stores every request. Duplicates return the cached response."
-talk "This prevents accidental double-spends from network retries."
+step "Idempotency — Duplicate Protection + Conflict Detection" "Same requestId = cached result; different payload = 409 Conflict"
+talk "DynamoDB stores every request. Duplicates return cached response, preventing double-spends."
+talk "Modified payloads with same requestId are rejected — stops replay attacks."
 
 UUID_IDEM=$(uuid)
 
@@ -342,18 +342,10 @@ echo "$IDEM_2" | pretty_json
 echo ""
 
 expect "Same transactionId returned — no duplicate transaction on Hedera"
-verify "DynamoDB: aws dynamodb get-item --table-name hedera_signing_audit --key '{\"pk\":{\"S\":\"REQ#$UUID_IDEM\"},\"sk\":{\"S\":\"RESULT\"}}'"
 check_result "$IDEM_2" "transactionId|requestId"
 
-pause
-
-# ══════════════════════════════════════════════════════════════════
-#  8. IDEMPOTENCY — PAYLOAD CONFLICT
-# ══════════════════════════════════════════════════════════════════
-step "Idempotency — Payload Conflict Detection" "Same requestId + different payload = 409 Conflict"
-talk "Prevents replay attacks where an attacker reuses a requestId with modified data."
-
-echo -e "  ${DIM}Same requestId but amountHbar changed from 1 to 2:${RESET}"
+echo ""
+echo -e "  ${DIM}Third call (same requestId, DIFFERENT payload — amountHbar changed to 2):${RESET}"
 CONFLICT=$(curl -s -X POST "$API_URL/sign-transfer" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -371,7 +363,7 @@ check_result "$CONFLICT" "CONFLICT|conflict|409"
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  9. TOKEN TRANSFER (HTS)
+#  8. TOKEN TRANSFER (HTS)
 # ══════════════════════════════════════════════════════════════════
 step "POST /sign-token-transfer — Hedera Token Service Transfer" "Transfer fungible tokens using KMS-signed transactions"
 talk "Same KMS signing flow but for HTS tokens instead of HBAR."
@@ -402,7 +394,7 @@ check_result "$TOKEN_RESPONSE" "transactionId|INVALID_TOKEN_ID|TOKEN_NOT_ASSOCIA
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  10. SCHEDULED TRANSFER
+#  9. SCHEDULED TRANSFER
 # ══════════════════════════════════════════════════════════════════
 step "POST /schedule-transfer — Scheduled (Delayed) Transaction" "Create a transaction that executes in 60 seconds — enterprise automation use case"
 talk "Uses Hedera ScheduleCreateTransaction wrapping a CryptoTransfer."
@@ -437,11 +429,11 @@ expect "scheduleId + transactionId + status: SUCCESS"
 check_result "$SCHED_RESPONSE" "scheduleId|transactionId"
 
 echo ""
-echo -e "  ${YELLOW}⏳ Waiting 70 seconds for the scheduled transaction to execute...${RESET}"
+echo -e "  ${YELLOW}⏳ Waiting 10 seconds for the scheduled transaction to execute...${RESET}"
 echo -e "  ${DIM}  (Schedule was set to execute after 60 seconds + 10s buffer)${RESET}"
 echo ""
 
-for i in $(seq 70 -1 1); do
+for i in $(seq 5 -1 1); do
   printf "\r  ${DIM}  ⏱  %02d seconds remaining...${RESET}" "$i"
   sleep 1
 done
@@ -477,7 +469,7 @@ fi
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  11. MULTI-SIG CONFIGURATION
+#  10. MULTI-SIG CONFIGURATION
 # ══════════════════════════════════════════════════════════════════
 step "GET /multisig-config — Multi-Signature Configuration" "Enterprise custody pattern: threshold keys for multi-party signing"
 talk "Shows current key configuration — supports Hedera KeyList / ThresholdKey."
@@ -496,7 +488,7 @@ check_result "$MULTISIG_RESPONSE" "threshold|keys"
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  12. KEY ROTATION
+#  11. KEY ROTATION
 # ══════════════════════════════════════════════════════════════════
 step "POST /rotate-key — KMS Key Rotation" "Create new KMS key, derive public key, update Hedera account key"
 talk "Full lifecycle key management — old key disabled, new key takes over."
@@ -521,7 +513,7 @@ check_result "$ROTATE_RESPONSE" "newKeyId|error|keyId|requestId"
 pause
 
 # ══════════════════════════════════════════════════════════════════
-#  13. OPENAPI DOCUMENTATION
+#  12. OPENAPI DOCUMENTATION
 # ══════════════════════════════════════════════════════════════════
 step "GET /docs — OpenAPI 3.0 Documentation" "Public endpoint — no auth required. Full API spec."
 talk "Importable into Postman, Swagger UI, or any OpenAPI-compatible tool."
@@ -539,6 +531,34 @@ check_result "$DOCS_RESPONSE" "openapi"
 pause
 
 # ══════════════════════════════════════════════════════════════════
+#  13. CREATE AUDIT TOPIC (HCS)
+# ══════════════════════════════════════════════════════════════════
+step "POST /create-audit-topic — Create HCS Audit Topic" "Creates a new Hedera Consensus Service topic for decentralized audit logging"
+talk "The topic's submit key is set to the KMS-derived public key."
+talk "Only our Lambda can submit messages to this topic."
+
+UUID_TOPIC=$(uuid)
+show_cmd "curl -s -X POST \"\$API/create-audit-topic\" -H 'Authorization: Bearer \$TOKEN' -d '{\"requestId\":\"...\"}'"
+echo ""
+
+TOPIC_RESPONSE=$(curl -s -X POST "$API_URL/create-audit-topic" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"requestId\": \"$UUID_TOPIC\"}")
+
+echo "$TOPIC_RESPONSE" | pretty_json
+echo ""
+
+NEW_TOPIC=$(echo "$TOPIC_RESPONSE" | extract topicId 2>/dev/null || echo "")
+if [ -n "$NEW_TOPIC" ] && [ "$NEW_TOPIC" != "" ]; then
+  verify "HashScan Topic: https://hashscan.io/testnet/topic/$NEW_TOPIC"
+fi
+expect "topicId returned — new HCS topic created on Hedera"
+check_result "$TOPIC_RESPONSE" "topicId|error|topic"
+
+pause
+
+# ══════════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════════
 banner "📊 Demo Results: $PASS passed, $FAIL failed out of $((PASS + FAIL)) tests"
@@ -551,13 +571,13 @@ echo -e "  ${GREEN} 3.${RESET} KMS public key derivation (private key never leav
 echo -e "  ${GREEN} 4.${RESET} Live HBAR transfer signed via KMS → submitted to Hedera testnet"
 echo -e "  ${GREEN} 5.${RESET} Policy engine blocks unauthorized recipients"
 echo -e "  ${GREEN} 6.${RESET} Schema validation rejects invalid amounts"
-echo -e "  ${GREEN} 7.${RESET} Idempotency prevents duplicate transactions"
-echo -e "  ${GREEN} 8.${RESET} Payload conflict detection (409)"
-echo -e "  ${GREEN} 9.${RESET} HTS token transfer via KMS signing"
-echo -e "  ${GREEN}10.${RESET} Scheduled transaction (60s delay) + live execution verification"
-echo -e "  ${GREEN}11.${RESET} Multi-signature configuration endpoint"
-echo -e "  ${GREEN}12.${RESET} KMS key rotation"
-echo -e "  ${GREEN}13.${RESET} OpenAPI 3.0 documentation (public)"
+echo -e "  ${GREEN} 7.${RESET} Idempotency + payload conflict detection"
+echo -e "  ${GREEN} 8.${RESET} HTS token transfer via KMS signing"
+echo -e "  ${GREEN} 9.${RESET} Scheduled transaction (60s delay) + live execution verification"
+echo -e "  ${GREEN}10.${RESET} Multi-signature configuration endpoint"
+echo -e "  ${GREEN}11.${RESET} KMS key rotation"
+echo -e "  ${GREEN}12.${RESET} OpenAPI 3.0 documentation (public)"
+echo -e "  ${GREEN}13.${RESET} Create HCS audit topic"
 echo ""
 echo -e "  ${BOLD}Key Innovation:${RESET} keccak256 + KMS bridge"
 echo -e "  ${DIM}  Hedera SDK uses keccak256 for ECDSA signing, not SHA-256.${RESET}"
